@@ -76,6 +76,11 @@ const baseConfig = new ScratchWebpackConfigBuilder(
                 context: 'node_modules/scratch-vm/dist/web',
                 from: 'extension-worker.{js,js.map}',
                 noErrorOnMissing: true
+            },
+            {
+                context: 'node_modules/scratch-storage/dist/web',
+                from: 'chunks/*.{js,js.map}',
+                noErrorOnMissing: true
             }
         ]
     }));
@@ -108,59 +113,70 @@ const distConfig = baseConfig.clone()
     );
 
 // build the examples and debugging tools in `build/`
-const buildConfig = baseConfig.clone()
+const buildConfig = baseConfig
+    .clone()
     .enableDevServer(process.env.PORT || 8601)
     .merge({
         entry: {
-            gui: './src/playground/index.jsx',
-            blocksonly: './src/playground/blocks-only.jsx',
-            compatibilitytesting: './src/playground/compatibility-testing.jsx',
-            player: './src/playground/player.jsx'
+            gui: "./src/playground/index.jsx",
+            blocksonly: "./src/playground/blocks-only.jsx",
+            compatibilitytesting: "./src/playground/compatibility-testing.jsx",
+            player: "./src/playground/player.jsx",
         },
         output: {
-            path: path.resolve(__dirname, 'build')
-        }
+            path: path.resolve(__dirname, "build"),
+        },
     })
-    .addPlugin(new HtmlWebpackPlugin({
-        ...commonHtmlWebpackPluginOptions,
-        chunks: ['gui'],
-        template: 'src/playground/index.ejs',
-        title: 'Scratch 3.0 GUI'
-    }))
-    .addPlugin(new HtmlWebpackPlugin({
-        ...commonHtmlWebpackPluginOptions,
-        chunks: ['blocksonly'],
-        filename: 'blocks-only.html',
-        template: 'src/playground/index.ejs',
-        title: 'Scratch 3.0 GUI: Blocks Only Example'
-    }))
-    .addPlugin(new HtmlWebpackPlugin({
-        ...commonHtmlWebpackPluginOptions,
-        chunks: ['compatibilitytesting'],
-        filename: 'compatibility-testing.html',
-        template: 'src/playground/index.ejs',
-        title: 'Scratch 3.0 GUI: Compatibility Testing'
-    }))
-    .addPlugin(new HtmlWebpackPlugin({
-        ...commonHtmlWebpackPluginOptions,
-        chunks: ['player'],
-        filename: 'player.html',
-        template: 'src/playground/index.ejs',
-        title: 'Scratch 3.0 GUI: Player Example'
-    }))
-    .addPlugin(new CopyWebpackPlugin({
-        patterns: [
-            {
-                from: 'static',
-                to: 'static'
-            },
-            {
-                from: 'extensions/**',
-                to: 'static',
-                context: 'src/examples'
-            }
-        ]
-    }));
+    .addPlugin(
+        new HtmlWebpackPlugin({
+            ...commonHtmlWebpackPluginOptions,
+            chunks: ["gui"],
+            template: "src/playground/index.ejs",
+            title: "BlockCode",
+        })
+    )
+    .addPlugin(
+        new HtmlWebpackPlugin({
+            ...commonHtmlWebpackPluginOptions,
+            chunks: ["blocksonly"],
+            filename: "blocks-only.html",
+            template: "src/playground/index.ejs",
+            title: "BlockCode: Blocks Only Example",
+        })
+    )
+    .addPlugin(
+        new HtmlWebpackPlugin({
+            ...commonHtmlWebpackPluginOptions,
+            chunks: ["compatibilitytesting"],
+            filename: "compatibility-testing.html",
+            template: "src/playground/index.ejs",
+            title: "BlockCode: Compatibility Testing",
+        })
+    )
+    .addPlugin(
+        new HtmlWebpackPlugin({
+            ...commonHtmlWebpackPluginOptions,
+            chunks: ["player"],
+            filename: "player.html",
+            template: "src/playground/index.ejs",
+            title: "BlockCode: Player Example",
+        })
+    )
+    .addPlugin(
+        new CopyWebpackPlugin({
+            patterns: [
+                {
+                    from: "static",
+                    to: "static",
+                },
+                {
+                    from: "extensions/**",
+                    to: "static",
+                    context: "src/examples",
+                },
+            ],
+        })
+    );
 
 // Skip building `dist/` unless explicitly requested
 // It roughly doubles build time and isn't needed for `scratch-gui` development

@@ -111,7 +111,7 @@ const downloadMicrobitHex = async () => {
 };
 
 const prepublish = async () => {
-    await downloadMicrobitHex();
+   // await downloadMicrobitHex();
 };
 
 prepublish().then(

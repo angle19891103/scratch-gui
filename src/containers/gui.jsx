@@ -1,3 +1,5 @@
+// 在文件顶部添加导入
+import CoSparkBridge from '../lib/cospark';
 import PropTypes from 'prop-types';
 import React from 'react';
 import {compose} from 'redux';
@@ -60,6 +62,34 @@ class GUI extends React.Component {
         this.props.onStorageInit(storage);
         this.props.onVmInit(this.props.vm);
         setProjectIdMetadata(this.props.projectId);
+               // 开发文档https://jcnvugseqapn.feishu.cn/wiki/RL1GwAM9Si4sAGkYS3QcG4Kznic
+        
+         // 初始化 CoSpark Bridge
+    // 方法1: 直接初始化
+    // 方法1: 直接初始化
+  if (this.props.vm) {
+    console.log('🔄 初始化 CoSparkAI 桥接器...');
+    const initResult = CoSparkBridge.init(this.props.vm);
+    
+    if (initResult.success) {
+      console.log('✅ CoSparkAI 初始化成功:', initResult);
+    } else {
+      console.error('❌ CoSparkAI 初始化失败:', initResult);
+      
+      // 尝试延迟初始化（VM可能还没完全就绪）
+      setTimeout(() => {
+        if (this.props.vm && !window.CoSparkAI) {
+          console.log('⏱️ 尝试延迟初始化 CoSparkAI...');
+          const retryResult = CoSparkBridge.init(this.props.vm);
+          if (retryResult.success) {
+            console.log('✅ CoSparkAI 延迟初始化成功');
+          }
+        }
+      }, 2000);
+    }
+  }
+        // ==========================================
+        // --- COSPARK INTEGRATION END ---
     }
     componentDidUpdate (prevProps) {
         if (this.props.projectId !== prevProps.projectId) {
