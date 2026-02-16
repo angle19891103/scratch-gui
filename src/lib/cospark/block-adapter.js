@@ -232,4 +232,50 @@ export default class BlockAdapter {
     
     return count;
   }
+  /**
+ * 将官方 SB3 扁平格式转换为适配器支持的嵌套格式
+ */
+_transformStandardToNested(blocks, blockId) {
+    const block = blocks[blockId];
+    if (!block) return null;
+
+    // 构建嵌套节点
+    const nestedNode = {
+        opcode: block.opcode,
+        inputs: {},
+        fields: block.fields || {},
+        substack: {},
+        next: null
+    };
+
+    // 1. 处理 Inputs 和 Substack
+    for (const [name, inputData] of Object.entries(block.inputs)) {
+        // 索引 [1, "ID"] 或 [2, "ID"] 代表指向另一个积木
+        const targetId = Array.isArray(inputData) && inputData.length > 1 ? inputData[1] : null;
+
+        if (name === 'SUBSTACK' || name === 'SUBSTACK2') {
+            // 处理循环/分支内部的积木
+            if (typeof targetId === 'string' && blocks[targetId]) {
+                nestedNode.substack[name] = this._transformStandardToNested(blocks, targetId);
+            }
+        } else {
+            // 处理普通输入（如数值、字符或嵌套的运算积木）
+            if (typeof targetId === 'string' && blocks[targetId]) {
+                nestedNode.inputs[name] = this._transformStandardToNested(blocks, targetId);
+            } else if (Array.isArray(inputData)) {
+                // 如果是直接数值 [1, [10, "10"]] -> 提取 10
+                const rawValue = inputData[1];
+                nestedNode.inputs[name] = Array.isArray(rawValue) ? rawValue[1] : rawValue;
+            }
+        }
+    }
+
+    // 2. 处理 Next 链
+    if (block.next && blocks[block.next]) {
+        nestedNode.next = this._transformStandardToNested(blocks, block.next);
+    }
+
+    return nestedNode;
+}
+
 }

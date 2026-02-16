@@ -19,6 +19,7 @@ class CoSparkBridge {
     this._layoutManager = null;
     this._lastOperationId = 0;
     this._operationHistory = [];
+    this.allowedOrigins = ['*']; // 默认允许所有，可配置为特定域名数组
     
     // 生产环境配置
     this.config = {
@@ -71,6 +72,8 @@ class CoSparkBridge {
       
       // 触发就绪事件
       this._emitReadyEvent();
+      // ... 原有代码，成功初始化后 ...
+      this._setupMessageListener();
       
       console.log('🚀 CoSparkBridge: 生产环境桥接器已就绪');
       
@@ -144,128 +147,155 @@ class CoSparkBridge {
    * @param {Object} aiJson - AI生成的JSON
    * @returns {Object} 生成结果
    */
-  async generateCode(aiJson) {
-    const operationId = ++this._lastOperationId;
-    const startTime = performance.now();
+  /**
+ * 生成积木核心方法 - 支持 AI 嵌套格式与官方 SB3 扁平格式
+ * @param {Object} aiJson - 输入的积木 JSON
+ */
+async generateCode(aiJson) {
+  const operationId = ++this._lastOperationId;
+  const startTime = performance.now();
+  
+  this._logOperation('start', operationId, { aiJson });
+  
+  // 1. 基本环境验证
+  if (!this._isInitialized) return this._errorResponse('Bridge not initialized', operationId);
+  if (!window.Blockly) return this._errorResponse('Blockly not available', operationId);
+  
+  const workspace = window.Blockly.getMainWorkspace();
+  if (!workspace) return this._errorResponse('Workspace not available', operationId);
+  
+  try {
+    // === 核心适配逻辑：将官方标准格式转换为 AI 嵌套格式 ===
+    let processingJson = aiJson;
     
-    // 记录操作开始
-    this._logOperation('start', operationId, { aiJson });
-    
-    // 基本验证
-    if (!this._isInitialized) {
-      return this._errorResponse('Bridge not initialized', operationId);
+    // 如果检测到 targets 数组，说明是官方标准格式
+    if (aiJson && Array.isArray(aiJson.targets)) {
+      this._logOperation('info', operationId, '检测到官方标准格式，开始转换...');
+      
+      // 提取第一个非舞台角色的 blocks
+      const sprite = aiJson.targets.find(t => !t.isStage);
+      if (!sprite || !sprite.blocks) {
+        throw new Error('Invalid SB3: No active sprite blocks found');
+      }
+
+      // 找到顶层积木 ID (topLevel 为 true 的积木)
+      const topBlockId = Object.keys(sprite.blocks).find(id => sprite.blocks[id].topLevel);
+      if (!topBlockId) {
+        throw new Error('Invalid SB3: No top-level block found');
+      }
+
+      // 执行递归转换：从扁平转嵌套
+      processingJson = this._transformStandardToNested(sprite.blocks, topBlockId);
+    }
+
+    // 2. 安全验证 (此时 processingJson 必须包含 opcode 字段)
+    const validation = SecurityValidator.validateAIJson(processingJson);
+    if (!validation.valid) {
+      console.error('CoSparkBridge: 验证失败:', validation.errors);
+      return this._errorResponse(`Validation failed: ${validation.errors.join(', ')}`, operationId);
     }
     
-    if (!window.Blockly) {
-      return this._errorResponse('Blockly not available', operationId);
+    // 3. 检查积木数量限制
+    const blockCount = BlockAdapter.countBlocks(processingJson);
+    if (blockCount > this.config.maxBlocksPerOperation) {
+      return this._errorResponse(`Block count exceeds limit: ${blockCount}`, operationId);
     }
     
-    const workspace = window.Blockly.getMainWorkspace();
-    if (!workspace) {
-      return this._errorResponse('Workspace not available', operationId);
+    // 4. 清理、规范化与变量处理
+    const sanitizedJson = SecurityValidator.sanitizeAIJson(processingJson);
+    this._variableManager.preprocessVariables(sanitizedJson);
+    
+    // 5. 布局与 XML 生成
+    const targetPosition = this._layoutManager.calculateBestPosition(workspace);
+    const xmlString = BlockAdapter.jsonToXml(sanitizedJson); // 此时适配器能处理嵌套格式了
+    
+    const dom = window.Blockly.Xml.textToDom(xmlString);
+    const firstBlock = dom.querySelector('block');
+    if (firstBlock) {
+      firstBlock.setAttribute('x', targetPosition.x);
+      firstBlock.setAttribute('y', targetPosition.y);
     }
     
-    try {
-      // 步骤1: 安全验证
-      const validation = SecurityValidator.validateAIJson(aiJson);
-      if (!validation.valid) {
-        console.error('CoSparkBridge: AI JSON验证失败:', validation.errors);
-        return this._errorResponse(`Validation failed: ${validation.errors.join(', ')}`, operationId);
+    // 6. 注入工作区
+    const newBlockIds = window.Blockly.Xml.domToWorkspace(dom, workspace);
+    
+    // 7. 后置处理 (滚动、音效、自动整理)
+    if (this.config.autoScroll && newBlockIds.length > 0) {
+      this._layoutManager.scrollToPosition(workspace, targetPosition.x, targetPosition.y);
+    }
+    
+    if (this.config.enableSound && workspace.getAudioManager) {
+      try { workspace.getAudioManager().play('click'); } catch (e) {}
+    }
+    
+    if (this.config.autoArrange) {
+      setTimeout(() => this._layoutManager.arrangeWorkspace(workspace), 100);
+    }
+    
+    this._syncWithVM();
+    
+    const duration = performance.now() - startTime;
+    this._logOperation('complete', operationId, { success: true, duration });
+    
+    return {
+      success: true,
+      operationId,
+      blockIds: newBlockIds,
+      count: newBlockIds.length,
+      duration: Math.round(duration)
+    };
+    
+  } catch (error) {
+    console.error('CoSparkBridge: 生成失败:', error);
+    return this._errorResponse(error.message, operationId, error);
+  }
+}
+
+/**
+ * 递归工具函数：将 Scratch 官方扁平 ID 引用结构转为嵌套对象结构
+ * @private
+ */
+_transformStandardToNested(blocks, blockId) {
+  const block = blocks[blockId];
+  if (!block) return null;
+
+  const result = {
+    opcode: block.opcode,
+    inputs: {},
+    fields: block.fields || {},
+    next: null,
+    substack: {}
+  };
+
+  // 处理输入 (Inputs)
+  for (const [name, inputData] of Object.entries(block.inputs)) {
+    // [1, "ID"] 格式表示后面跟着一个积木 ID
+    const targetId = Array.isArray(inputData) && inputData.length > 1 ? inputData[1] : null;
+
+    if (name.includes('SUBSTACK')) {
+      // 处理循环体内部 (如 repeat)
+      if (targetId && blocks[targetId]) {
+        result.substack[name] = this._transformStandardToNested(blocks, targetId);
       }
-      
-      // 步骤2: 检查积木数量限制
-      const blockCount = BlockAdapter.countBlocks(aiJson);
-      if (blockCount > this.config.maxBlocksPerOperation) {
-        return this._errorResponse(
-          `Block count exceeds limit: ${blockCount} > ${this.config.maxBlocksPerOperation}`,
-          operationId
-        );
+    } else {
+      // 处理普通输入槽
+      if (typeof targetId === 'string' && blocks[targetId]) {
+        result.inputs[name] = this._transformStandardToNested(blocks, targetId);
+      } else {
+        // 如果是直接值 (如 [1, [10, "10"]])，提取内部的原始数据
+        result.inputs[name] = Array.isArray(inputData) ? inputData : inputData;
       }
-      
-      // 步骤3: 清理和规范化JSON
-      const sanitizedJson = SecurityValidator.sanitizeAIJson(aiJson);
-      
-      // 步骤4: 预处理变量（如果需要）
-      this._variableManager.preprocessVariables(sanitizedJson);
-      
-      // 步骤5: 计算最佳位置
-      const targetPosition = this._layoutManager.calculateBestPosition(workspace);
-      
-      // 步骤6: 生成XML并设置坐标
-      const xmlString = BlockAdapter.jsonToXml(sanitizedJson);
-      const dom = window.Blockly.Xml.textToDom(xmlString);
-      
-      // 设置坐标（找到第一个block元素）
-      const firstBlock = dom.querySelector('block');
-      if (firstBlock) {
-        firstBlock.setAttribute('x', targetPosition.x);
-        firstBlock.setAttribute('y', targetPosition.y);
-      }
-      
-      // 步骤7: 注入积木到工作区
-      const newBlockIds = window.Blockly.Xml.domToWorkspace(dom, workspace);
-      
-      // 步骤8: 自动滚动到新积木位置
-      if (this.config.autoScroll && newBlockIds.length > 0) {
-        this._layoutManager.scrollToPosition(workspace, targetPosition.x, targetPosition.y);
-      }
-      
-      // 步骤9: 播放音效
-      if (this.config.enableSound && workspace.getAudioManager) {
-        try {
-          workspace.getAudioManager().play('click');
-        } catch (audioError) {
-          // 忽略音效错误
-        }
-      }
-      
-      // 步骤10: 整理工作区布局
-      if (this.config.autoArrange) {
-        setTimeout(() => {
-          this._layoutManager.arrangeWorkspace(workspace);
-        }, 100);
-      }
-      
-      // 步骤11: 通知VM更新
-      this._syncWithVM();
-      
-      // 计算执行时间
-      const endTime = performance.now();
-      const duration = endTime - startTime;
-      
-      // 记录操作完成
-      this._logOperation('complete', operationId, {
-        success: true,
-        blockCount: newBlockIds.length,
-        duration,
-        position: targetPosition
-      });
-      
-      // 返回成功结果
-      return {
-        success: true,
-        operationId,
-        blockIds: newBlockIds,
-        count: newBlockIds.length,
-        position: targetPosition,
-        duration: Math.round(duration),
-        timestamp: Date.now(),
-        warnings: validation.warnings
-      };
-      
-    } catch (error) {
-      // 错误处理
-      console.error('CoSparkBridge: 生成积木失败:', error);
-      
-      // 记录操作失败
-      this._logOperation('error', operationId, {
-        error: error.message,
-        stack: process.env.NODE_ENV !== 'production' ? error.stack : undefined
-      });
-      
-      return this._errorResponse(error.message, operationId, error);
     }
   }
+
+  // 处理下一个积木 (Next Chain)
+  if (block.next && blocks[block.next]) {
+    result.next = this._transformStandardToNested(blocks, block.next);
+  }
+
+  return result;
+}
+
   
   /**
    * 获取当前上下文
@@ -860,6 +890,64 @@ async getCurrentSprite() {
     
     return this._operationHistory;
   }
+  /**
+ * 设置 postMessage 监听，支持跨域调用
+ */
+_setupMessageListener() {
+  if (this._messageListenerAdded) return;
+  this._messageListenerAdded = true;
+
+  window.addEventListener('message', async (event) => {
+    // 安全检查：如果配置了允许的域名列表，则验证 origin
+    if (this.allowedOrigins[0] !== '*') {
+      if (!this.allowedOrigins.includes(event.origin)) {
+        console.warn(`CoSparkBridge: 拒绝来自 ${event.origin} 的消息`);
+        return;
+      }
+    }
+
+    const { type, method, params, id } = event.data || {};
+    
+    // 只处理 CoSparkAI 相关的请求
+    if (type !== 'COSPARK_REQUEST') return;
+
+    // 检查方法是否存在
+    if (!window.CoSparkAI || typeof window.CoSparkAI[method] !== 'function') {
+      this._sendMessageResponse(event.source, event.origin, {
+        type: 'COSPARK_RESPONSE',
+        id,
+        error: `方法 ${method} 不存在`
+      });
+      return;
+    }
+
+    try {
+      // 调用对应方法，支持异步
+      const result = await window.CoSparkAI[method](...params);
+      this._sendMessageResponse(event.source, event.origin, {
+        type: 'COSPARK_RESPONSE',
+        id,
+        result
+      });
+    } catch (error) {
+      this._sendMessageResponse(event.source, event.origin, {
+        type: 'COSPARK_RESPONSE',
+        id,
+        error: error.message
+      });
+    }
+  });
+}
+
+/**
+ * 发送响应消息
+ */
+_sendMessageResponse(target, origin, data) {
+  // 如果 origin 为 '*'，则使用 '*' 可能导致浏览器警告，最好使用具体的 origin
+  // 这里使用 target.origin 或 event.origin，但 target 是 Window 对象，没有 origin 属性
+  // 可以用 '*' 或从事件中保存的 origin
+  target.postMessage(data, { targetOrigin: origin === '*' ? '*' : origin });
+}
 }
 
 // 导出单例实例
