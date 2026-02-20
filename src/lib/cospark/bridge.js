@@ -103,6 +103,10 @@ class CoSparkBridge {
       generate: this.generateCode.bind(this),
       getContext: this.getContext.bind(this),
       importImage: this.importImage.bind(this),  // ← 新增这一行
+      // 👇 新增方法
+      createSprite: this.createSprite.bind(this),
+      replaceSpriteImage: this.replaceSpriteImage.bind(this),
+
       switchToSprite: this.switchToSprite.bind(this),// ← 新增这一行,切换角色
       getAllSprites: this.getAllSprites.bind(this),// ← 新增这一行,获取所有角色
       // 工具功能
@@ -250,6 +254,109 @@ async generateCode(aiJson) {
     return this._errorResponse(error.message, operationId, error);
   }
 }
+/**
+ * 内部：智能处理输入数据
+ * 支持：SVG代码字符串、Data URI、URL
+ * 返回：{ data: Uint8Array, format: 'SVG' | 'PNG', width: number, height: number }
+ */
+async _parseInputData(input) {
+  const encoder = new TextEncoder();
+  let data;
+  let format = 'PNG';
+  let width = 100; // 默认宽高
+  let height = 100;
+
+  // 1. 判断是否为 SVG 代码字符串
+  if (typeof input === 'string' && input.trim().startsWith('<')) {
+    format = 'SVG';
+    data = encoder.encode(input);
+    // 尝试从字符串中提取宽高
+    this._extractSvgDimensions(input, (w, h) => { width = w; height = h; });
+    return { data, format, width, height };
+  }
+
+  // 2. 判断是否为 Data URI
+  if (typeof input === 'string' && input.startsWith('data:')) {
+    const header = input.substring(5, 20).toLowerCase();
+    if (header.includes('svg')) format = 'SVG';
+    
+    if (format === 'SVG') {
+      let svgString = '';
+      // 处理 base64 编码的 SVG
+      if (header.includes('base64')) {
+          const base64Match = input.match(/base64,(.*)/);
+          if (base64Match) svgString = atob(base64Match[1]);
+      } else {
+          // 处理 URL 编码的 SVG (data:image/svg+xml,...)
+          const svgStart = input.indexOf('<svg');
+          if (svgStart !== -1) svgString = decodeURIComponent(input.substring(svgStart));
+      }
+      
+      if (svgString) {
+          data = encoder.encode(svgString);
+          this._extractSvgDimensions(svgString, (w, h) => { width = w; height = h; });
+          return { data, format, width, height };
+      }
+    } else {
+      // PNG/JPG
+      const response = await fetch(input);
+      data = new Uint8Array(await response.arrayBuffer());
+      return { data, format, width, height };
+    }
+  }
+
+  // 3. URL
+  if (typeof input === 'string') {
+    const lowerUrl = input.toLowerCase();
+    if (lowerUrl.endsWith('.svg')) format = 'SVG';
+    
+    const response = await fetch(input);
+    if (!response.ok) throw new Error(`Fetch failed: ${response.statusText}`);
+    
+    if (format === 'SVG') {
+        const text = await response.text();
+        data = encoder.encode(text);
+        this._extractSvgDimensions(text, (w, h) => { width = w; height = h; });
+    } else {
+        data = new Uint8Array(await response.arrayBuffer());
+    }
+    return { data, format, width, height };
+  }
+
+  throw new Error('Invalid input type');
+}
+
+/**
+ * 辅助：从 SVG 字符串中提取宽高 (支持 width="100" 和 viewBox)
+ */
+_extractSvgDimensions(svgString, callback) {
+    try {
+        // 正则匹配 width="..."
+        const wMatch = svgString.match(/width="([^"]+)"/);
+        const hMatch = svgString.match(/height="([^"]+)"/);
+        let w = 100, h = 100;
+
+        if (wMatch && hMatch) {
+            w = parseFloat(wMatch[1]);
+            h = parseFloat(hMatch[1]); // 修正：这里应该是 hMatch[1]
+        }
+        
+        // 如果没有宽高属性，尝试解析 viewBox
+        if (!wMatch && !hMatch) {
+            const vbMatch = svgString.match(/viewBox="([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)"/);
+            if (vbMatch) {
+                w = parseFloat(vbMatch[3]);
+                h = parseFloat(vbMatch[4]);
+            }
+        }
+        
+        // 确保数值有效
+        callback(isNaN(w) ? 100 : w, isNaN(h) ? 100 : h);
+    } catch (e) {
+        callback(100, 100);
+    }
+}
+
 
 /**
  * 递归工具函数：将 Scratch 官方扁平 ID 引用结构转为嵌套对象结构
@@ -552,6 +659,141 @@ async importImage(imageUrl, type = 'backdrop', name = 'AI Art') {
         return { success: false, error: e.message };
     }
 }
+/**
+ * 【AI -> Scratch】生成新角色
+ * @param {string} svgData - SVG代码字符串、Data URI 或 URL
+ * @param {string} spriteName - 新角色的名称
+ * @returns {Promise<Object>} 创建结果
+ */
+/**
+ * 【AI -> Scratch】生成新角色
+ */
+async createSprite(svgData, spriteName = 'AI Character') {
+    if (!this._vm) return { success: false, error: "VM not ready" };
+
+    try {
+        console.log(`CoSparkBridge: 创建新角色 "${spriteName}"...`);
+        
+        // 1. 解析输入数据，获取 format, width, height
+        const { data, format, width, height } = await this._parseInputData(svgData);
+        const isSvg = format === 'SVG';
+
+        // 2. 注册资产
+        const storage = this._vm.runtime.storage;
+        const AssetType = storage.AssetType;
+        const DataFormat = storage.DataFormat;
+
+        // 👉 关键修复：SVG 必须使用 ImageVector 类型
+        const assetType = isSvg ? AssetType.ImageVector : AssetType.ImageBitmap;
+        
+        const asset = storage.createAsset(
+            assetType, 
+            isSvg ? DataFormat.SVG : DataFormat.PNG,
+            data,
+            null,
+            true
+        );
+
+        const md5ext = `${asset.assetId}.${asset.dataFormat}`;
+
+        // 3. 计算旋转中心 (SVG 中心点应为画布中心)
+        const costumeObject = {
+            name: '造型',
+            md5: md5ext,
+            assetId: asset.assetId,
+            asset: asset,
+            dataFormat: asset.dataFormat,
+            bitmapResolution: 1,
+            // 👉 关键修复：旋转中心设为 SVG 宽高的一半
+            rotationCenterX: width / 2,
+            rotationCenterY: height / 2
+        };
+
+        // 4. 构造角色对象
+        const newSpriteObject = {
+            isStage: false,
+            name: spriteName,
+            costumes: [costumeObject],
+            sounds: [],
+            blocks: {},
+            variables: {},
+            visible: true,
+            x: 0, // 舞台中心
+            y: 0,
+            size: 100,
+            direction: 90
+        };
+
+        // 5. 注入到 VM
+        await this._vm.addSprite(newSpriteObject);
+
+        this._vm.emitTargetsUpdate();
+        this._vm.runtime.requestRedraw();
+
+        return { success: true, spriteName, md5ext };
+
+    } catch (e) {
+        console.error("CoSpark Create Sprite Error:", e);
+        return { success: false, error: e.message };
+    }
+}
+
+/**
+ * 【AI -> Scratch】替换当前角色的造型
+ * @param {string} svgData - SVG代码字符串、Data URI 或 URL
+ * @returns {Promise<Object>} 替换结果
+ */
+/**
+ * 【核心方法】替换当前角色的造型 (支持 SVG 字符串/URL)
+ * @param {string} svgData - SVG代码字符串、Data URI 或 URL
+ */
+async replaceSpriteImage(svgData) {
+    if (!this._vm) return { success: false, error: "VM not ready" };
+
+    try {
+        const { data, format, width, height } = await this._parseInputData(svgData);
+        const isSvg = format === 'SVG';
+
+        const storage = this._vm.runtime.storage;
+        const assetType = isSvg ? storage.AssetType.ImageVector : storage.AssetType.ImageBitmap;
+        const dataFormat = isSvg ? storage.DataFormat.SVG : storage.DataFormat.PNG;
+        
+        const asset = storage.createAsset(assetType, dataFormat, data, null, true);
+        const md5ext = `${asset.assetId}.${asset.dataFormat}`;
+
+        const costumeObject = {
+            name: '新造型',
+            md5: md5ext,
+            assetId: asset.assetId,
+            asset: asset,
+            dataFormat: asset.dataFormat,
+            bitmapResolution: 1,
+            rotationCenterX: width / 2,
+            rotationCenterY: height / 2
+        };
+
+        // 注入到当前角色
+        const editingTarget = this._vm.editingTarget;
+        if (!editingTarget || editingTarget.isStage) {
+            return { success: false, error: "请先选中一个角色" };
+        }
+
+        await this._vm.addCostume(editingTarget.id, md5ext, costumeObject);
+        
+        // 切换到新造型
+        editingTarget.setCostume(editingTarget.costumes.length - 1);
+        
+        this._vm.emitTargetsUpdate();
+        this._vm.runtime.requestRedraw();
+
+        return { success: true, spriteName: editingTarget.getName() };
+
+    } catch (e) {
+        console.error("CoSpark Replace Sprite Error:", e);
+        return { success: false, error: e.message };
+    }
+}
+
 
 /**
  * 内部：把 costume/backdrop 注入到舞台或角色
