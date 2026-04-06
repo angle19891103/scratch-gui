@@ -4,6 +4,8 @@ const webpack = require('webpack');
 // Plugins
 const CopyWebpackPlugin = require('copy-webpack-plugin');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
+// 🟢 新增：引入压缩插件
+const CompressionPlugin = require('compression-webpack-plugin');
 
 const ScratchWebpackConfigBuilder = require('scratch-webpack-configuration');
 
@@ -25,16 +27,51 @@ const baseConfig = new ScratchWebpackConfigBuilder(
     {
         rootPath: path.resolve(__dirname),
         enableReact: true,
-        shouldSplitChunks: false,
+        // 🟢 优化 1：开启代码分割，防止单一 JS 文件过大阻塞加载
+        shouldSplitChunks: true,
         publicPath: 'auto'
     })
     .setTarget('browserslist')
     .merge({
+        // 🟢 优化 2：开启 Webpack 5 文件系统缓存，大幅提升二次打包速度
+        cache: {
+            type: 'filesystem',
+            buildDependencies: {
+                config: [__filename]
+            }
+        },
         output: {
+            // 🟢 优化 3：确保分离出来的 chunk 带有 hash，方便浏览器利用强缓存
+            chunkFilename: 'static/assets/[name].[contenthash].js',
             assetModuleFilename: 'static/assets/[name].[hash][ext][query]',
             library: {
                 name: 'GUI',
                 type: 'umd2'
+            }
+        },
+        // 🟢 优化 4：细化代码分割策略，将超大依赖剥离
+        optimization: {
+            splitChunks: {
+                chunks: 'all',
+                minSize: 30000,
+                maxSize: 500000, // 将大于 500KB 的包尝试进一步拆分
+                cacheGroups: {
+                    react: {
+                        test: /[\\/]node_modules[\\/](react|react-dom)[\\/]/,
+                        name: 'react-vendor',
+                        priority: 20,
+                    },
+                    scratchCore: {
+                        test: /[\\/]node_modules[\\/](scratch-blocks|scratch-vm|scratch-render|scratch-audio|scratch-storage)[\\/]/,
+                        name: 'scratch-core',
+                        priority: 15,
+                    },
+                    vendors: {
+                        test: /[\\/]node_modules[\\/]/,
+                        name: 'vendors',
+                        priority: 10,
+                    }
+                }
             }
         },
         resolve: {
@@ -47,7 +84,13 @@ const baseConfig = new ScratchWebpackConfigBuilder(
     .addModuleRule({
         test: /\.(svg|png|wav|mp3|gif|jpg)$/,
         resourceQuery: /^$/, // reject any query string
-        type: 'asset' // let webpack decide on the best type of asset
+        type: 'asset', // let webpack decide on the best type of asset
+        // 🟢 优化 5：限制小资源内联大小（仅对小于 8KB 的图片/音频转 Base64，避免撑爆 JS 体积）
+        parser: {
+            dataUrlCondition: {
+                maxSize: 8 * 1024
+            }
+        }
     })
     .addPlugin(new webpack.DefinePlugin({
         'process.env.DEBUG': Boolean(process.env.DEBUG),
@@ -179,10 +222,20 @@ const buildConfig = baseConfig
     );
 
 // Skip building `dist/` unless explicitly requested
-// It roughly doubles build time and isn't needed for `scratch-gui` development
-// If you need non-production `dist/` for local dev, such as for `scratch-www` work, you can run something like:
-// `BUILD_MODE=dist npm run build`
 const buildDist = process.env.NODE_ENV === 'production' || process.env.BUILD_MODE === 'dist';
+
+// 🟢 优化 6：仅在生产环境构建时开启 Gzip 压缩
+if (buildDist) {
+    const compressionOptions = {
+        filename: '[path][base].gz',
+        algorithm: 'gzip',
+        test: /\.(js|css|html|svg)$/,
+        threshold: 10240, // 仅对大于 10KB 的文件进行压缩
+        minRatio: 0.8
+    };
+    distConfig.addPlugin(new CompressionPlugin(compressionOptions));
+    buildConfig.addPlugin(new CompressionPlugin(compressionOptions));
+}
 
 module.exports = buildDist ?
     [buildConfig.get(), distConfig.get()] :
